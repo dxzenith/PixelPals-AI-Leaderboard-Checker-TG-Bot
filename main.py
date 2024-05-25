@@ -4,6 +4,7 @@ import logging
 from telegram import Update
 from telegram.ext import Updater, CommandHandler, CallbackContext
 from keep_alive import keep_alive
+import fcntl
 
 # Enable logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -11,11 +12,20 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 
 logger = logging.getLogger(__name__)
 
-# Define the API endpoint and headers
-API_ENDPOINT = 'https://api.pixelpals.ai/rest/v1/leaderboard_habitat_view'
-HEADERS = {
-    'Content-Type': 'application/json'
-}
+LOCK_FILE_PATH = "bot.lock"
+
+def acquire_lock():
+    try:
+        lock_file = open(LOCK_FILE_PATH, "w")
+        fcntl.lockf(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return lock_file
+    except IOError:
+        logger.error("Failed to acquire lock. Another instance may be running.")
+        return None
+
+def release_lock(lock_file):
+    lock_file.close()
+    os.remove(LOCK_FILE_PATH)
 
 def start(update: Update, context: CallbackContext) -> None:
     update.message.reply_text('Hello! Use /leaderboard <wallet_address1> <wallet_address2> ... to get the leaderboard data.')
@@ -25,7 +35,7 @@ def get_leaderboard_data(wallet_address: str):
         # Convert the wallet address to lowercase
         wallet_address = wallet_address.lower()
         
-        response = requests.get(f'{API_ENDPOINT}?wallet_address=eq.{wallet_address}&order=date.desc&limit=1', headers=HEADERS)
+        response = requests.get(f'https://api.pixelpals.ai/rest/v1/leaderboard_habitat_view?wallet_address=eq.{wallet_address}&order=date.desc&limit=1')
         response.raise_for_status()  # Raises an HTTPError for bad responses
         return response.json()
     except requests.RequestException as e:
@@ -57,30 +67,40 @@ def leaderboard(update: Update, context: CallbackContext) -> None:
             update.message.reply_text(f"Error: Failed to fetch data for wallet address {wallet_address}")
 
 def main():
-    # Keep the server alive
-    keep_alive()
+    # Try to acquire the lock
+    lock_file = acquire_lock()
+    if not lock_file:
+        return
 
-    # Read the bot token from environment variable
-    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-    if not bot_token:
-        raise ValueError("No TELEGRAM_BOT_TOKEN found in environment variables")
+    try:
+        # Keep the server alive
+        keep_alive()
 
-    # Create the Updater and pass it your bot's token.
-    updater = Updater(bot_token)
+        # Read the bot token from environment variable
+        bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+        if not bot_token:
+            raise ValueError("No TELEGRAM_BOT_TOKEN found in environment variables")
 
-    # Get the dispatcher to register handlers
-    dispatcher = updater.dispatcher
+        # Create the Updater and pass it your bot's token.
+        updater = Updater(bot_token)
 
-    # Register the command handlers
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(CommandHandler("leaderboard", leaderboard))
+        # Get the dispatcher to register handlers
+        dispatcher = updater.dispatcher
 
-    # Start the Bot
-    updater.start_polling()
+        # Register the command handlers
+        dispatcher.add_handler(CommandHandler("start", start))
+        dispatcher.add_handler(CommandHandler("leaderboard", leaderboard))
 
-    # Run the bot until you press Ctrl-C or the process receives SIGINT,
-    # SIGTERM or SIGABRT.
-    updater.idle()
+        # Start the Bot
+        updater.start_polling()
+
+        # Run the bot until you press Ctrl-C or the process receives SIGINT,
+        # SIGTERM or SIGABRT.
+        updater.idle()
+    finally:
+        # Release the lock
+        if lock_file:
+            release_lock(lock_file)
 
 if __name__ == '__main__':
     main()
